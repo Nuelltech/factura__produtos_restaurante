@@ -1,14 +1,15 @@
 import express from "express";
-import dotenv from "dotenv";
+import fetch from "node-fetch"; // Para buscar a imagem via URL
 import OpenAI from "openai";
 import mysql from "mysql2/promise";
+import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-app.use(express.json()); // Para processar JSON
+app.use(express.json({ limit: "10mb" })); // para receber JSON com fileUrl
 
-// Configuração do cliente OpenAI
+// Configuração OpenAI
 const client = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
 // Conexão MySQL
@@ -19,29 +20,45 @@ const pool = mysql.createPool({
   database: process.env.MYSQL_DB,
 });
 
-// Endpoint principal para processar faturas via URL
+// Endpoint principal
 app.post("/process-fatura", async (req, res) => {
   try {
     const { fileUrl } = req.body;
 
-    if (!fileUrl) {
+    if (!fileUrl || fileUrl === "null") {
       return res.status(400).json({ error: "Parâmetro 'fileUrl' não fornecido" });
     }
 
-    // Chamada à API OpenAI (modelo multimodal)
+    console.log("Recebido fileUrl:", fileUrl);
+
+    // Buscar a imagem do URL
+    const response = await fetch(fileUrl);
+    if (!response.ok) {
+      return res.status(400).json({ error: "Não foi possível baixar a imagem" });
+    }
+
+    const buffer = await response.arrayBuffer();
+    const base64Image = Buffer.from(buffer).toString("base64");
+
+    console.log("Imagem convertida para base64, tamanho:", base64Image.length);
+
+    // Chamada à OpenAI GPT-4o para extrair dados
     const aiResponse = await client.responses.create({
-      model: "gpt-4.1-mini", // modelo compatível
+      model: "gpt-4o", // modelo multimodal
       input: [
         {
           role: "user",
           content: [
             {
-              type: "image_url",
-              image_url: { url: fileUrl }
+              type: "input_image",
+              image_url: fileUrl
             },
             {
               type: "input_text",
-              text: "Extrai os dados da fatura em JSON com os campos: supplier_description, supplier_code, purchase_date, items[].qty, items[].unit_supplier, items[].price_unit, items[].price_total, items[].vat_rate"
+              text: `Extrai os dados da fatura em JSON com os campos: 
+              supplier_description, supplier_code, purchase_date, 
+              items[].qty, items[].unit_supplier, items[].price_unit, 
+              items[].price_total, items[].vat_rate`
             }
           ]
         }
@@ -49,6 +66,7 @@ app.post("/process-fatura", async (req, res) => {
     });
 
     const jsonText = aiResponse.output_text;
+    console.log("Resposta AI:", jsonText);
 
     let json;
     try {
@@ -74,18 +92,19 @@ app.post("/process-fatura", async (req, res) => {
           item.price_unit || 0,
           item.price_total || 0,
           item.vat_rate || 0,
-          json.purchase_date || null,
+          json.purchase_date || null
         ]
       );
     }
 
     res.json({ status: "ok", data: json });
+
   } catch (err) {
     console.error("Erro no processamento:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Porta fornecida pelo Render
+// Porta
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor iniciado na porta ${PORT}`));
