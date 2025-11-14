@@ -31,16 +31,25 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
     const filePath = req.file.path;
     const fileData = fs.readFileSync(filePath);
 
-    // Processa a imagem usando a Responses API (GPT-4.1-mini ou gpt-4o-mini)
+    // Converte imagem para base64
+    const base64Image = fileData.toString("base64");
+
+    // Processa a imagem usando a API multimodal OpenAI
     const aiResponse = await client.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o", // conferir sempre o modelo correto na tua conta
       input: [
         {
           role: "user",
           content: [
-            { type: "file", file: fileData },
             {
-              type: "text",
+              type: "input_image",
+              image: {
+                data: base64Image,
+                mime_type: req.file.mimetype || "image/jpeg"
+              }
+            },
+            {
+              type: "input_text",
               text: "Extrai os dados da fatura em JSON com os campos: supplier_description, supplier_code, purchase_date, items[].qty, items[].unit_supplier, items[].price_unit, items[].price_total, items[].vat_rate"
             }
           ]
@@ -56,6 +65,7 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
       json = JSON.parse(jsonText);
     } catch (err) {
       console.error("Erro ao parsear JSON do modelo:", jsonText);
+      fs.unlinkSync(filePath);
       return res.status(500).json({ error: "Falha ao parsear JSON do modelo" });
     }
 
@@ -92,4 +102,3 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
 // Porta fornecida pelo Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor iniciado na porta ${PORT}`));
-
