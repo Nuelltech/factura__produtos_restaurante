@@ -8,12 +8,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const upload = multer({ dest: "uploads/" }); // pasta temporária para uploads
+const upload = multer({ dest: "uploads/" });
 
-// Configuração OpenAI
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_KEY,
-});
+// Configuração do cliente OpenAI
+const client = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
 // Conexão MySQL
 const pool = mysql.createPool({
@@ -23,11 +21,9 @@ const pool = mysql.createPool({
   database: process.env.MYSQL_DB,
 });
 
-// Endpoint para processar fatura
+// Endpoint principal para upload de fatura
 app.post("/process-fatura", upload.single("file"), async (req, res) => {
   try {
-    console.log("Recebido req.file:", req.file);
-
     if (!req.file) {
       return res.status(400).json({ error: "Ficheiro não enviado" });
     }
@@ -35,56 +31,65 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
     const filePath = req.file.path;
     const fileData = fs.readFileSync(filePath);
 
-    // Chamada OpenAI para extrair dados da fatura
-    const aiResponse = await client.chat.completions.create({
-      model: "gpt-4",
-      messages: [
-        { role: "system", content: "Extrai dados de faturas e devolve JSON válido." },
+    // Processa a imagem usando a Responses API (GPT-4.1-mini ou gpt-4o-mini)
+    const aiResponse = await client.responses.create({
+      model: "gpt-4.1-mini",
+      input: [
         {
           role: "user",
           content: [
-            { type: "file", file: fileData, filename: req.file.originalname },
-            { type: "text", text: "Extrai fornecedor, NIF, data, número de fatura, items (qty, unit_supplier, price_unit, price_total, vat_rate)." }
+            { type: "file", file: fileData },
+            {
+              type: "text",
+              text: "Extrai os dados da fatura em JSON com os campos: supplier_description, supplier_code, purchase_date, items[].qty, items[].unit_supplier, items[].price_unit, items[].price_total, items[].vat_rate"
+            }
           ]
         }
       ]
     });
 
-    const jsonText = aiResponse.choices[0].message.content;
-    const json = JSON.parse(jsonText);
+    // O texto retornado pelo modelo
+    const jsonText = aiResponse.output_text;
 
-    // Inserir os itens na tabela Raw_Purchase_Items
-    for (const item of json.items) {
-      const sql = `
-        INSERT INTO Raw_Purchase_Items
-        (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date, processed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `;
-      await pool.execute(sql, [
-        json.purchase_id || null,
-        json.supplier_id || null,
-        json.supplier_code || null,
-        json.supplier_description || null,
-        item.qty,
-        item.unit_supplier,
-        item.price_unit,
-        item.price_total,
-        item.vat_rate,
-        json.purchase_date,
-        0
-      ]);
+    let json;
+    try {
+      json = JSON.parse(jsonText);
+    } catch (err) {
+      console.error("Erro ao parsear JSON do modelo:", jsonText);
+      return res.status(500).json({ error: "Falha ao parsear JSON do modelo" });
     }
 
-    fs.unlinkSync(filePath); // Apaga ficheiro temporário
+    // Inserção na tabela Raw_Purchase_Items
+    for (const item of json.items) {
+      await pool.execute(
+        `INSERT INTO Raw_Purchase_Items
+          (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date, processed)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+        [
+          json.purchase_id || null,
+          json.supplier_id || null,
+          json.supplier_code || null,
+          json.supplier_description || null,
+          item.qty || 0,
+          item.unit_supplier || null,
+          item.price_unit || 0,
+          item.price_total || 0,
+          item.vat_rate || 0,
+          json.purchase_date || null,
+        ]
+      );
+    }
+
+    fs.unlinkSync(filePath); // remove o ficheiro temporário
 
     res.json({ status: "ok", data: json });
-
   } catch (err) {
     console.error("Erro no processamento:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Porta
+// Porta fornecida pelo Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor iniciado na porta ${PORT}`));
+
