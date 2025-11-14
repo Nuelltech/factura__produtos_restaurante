@@ -43,7 +43,7 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
         {
           role: "user",
           content: [
-            { type: ""file"", data: fileData, name: req.file.originalname },
+            { type: "file", data: fileData, name: req.file.originalname },
             { type: "text", text: "Extrai fornecedor, NIF, data, número de fatura, items (qty, unit_supplier, price_unit, price_total, vat_rate)." }
           ]
         }
