@@ -37,7 +37,7 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
 
     // Chamada OpenAI para extrair dados da fatura
     const aiResponse = await client.chat.completions.create({
-      model: "gpt-4.1-preview",
+      model: "gpt-4",
       messages: [
         { role: "system", content: "Extrai dados de faturas e devolve JSON válido." },
         {
