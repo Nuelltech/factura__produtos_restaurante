@@ -4,6 +4,7 @@ import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
 import Tesseract from "tesseract.js";
+import mysql from "mysql2/promise";
 
 dotenv.config();
 
@@ -12,6 +13,17 @@ app.use(cors());
 app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
+
+// Conexão MySQL
+const db = await mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
 
 app.post("/process-fatura", async (req, res) => {
   try {
@@ -71,23 +83,59 @@ A estrutura deve ser:
 }
 `
         },
-        {
-          role: "user",
-          content: ocrText
-        }
+        { role: "user", content: ocrText }
       ]
     });
 
     const text = completion.choices?.[0]?.message?.content;
 
     // 4️⃣ Garantir que é JSON válido
+    let parsed;
     try {
-      const parsed = JSON.parse(text);
-      return res.json(parsed);
+      parsed = JSON.parse(text);
     } catch (err) {
       console.log("⚠️ Modelo não devolveu JSON válido:", text);
       return res.status(500).json({ error: "Falha ao parsear JSON", raw_output: text });
     }
+
+    // 5️⃣ Inserir na base de dados
+    const connection = await db.getConnection();
+    try {
+      await connection.beginTransaction();
+
+      // Inserir cada item na tabela Raw_Purchase_Items
+      const insertItemQuery = `
+        INSERT INTO Raw_Purchase_Items
+        (supplier_description, supplier_code, purchase_date, description, qty, unit_supplier, price_unit, price_total, vat_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      for (const item of parsed.items) {
+        await connection.execute(insertItemQuery, [
+          parsed.supplier_description,
+          parsed.supplier_code,
+          parsed.purchase_date,
+          item.description,
+          item.qty,
+          item.unit_supplier,
+          item.price_unit,
+          item.price_total,
+          item.vat_rate
+        ]);
+      }
+
+      await connection.commit();
+      console.log("✅ Itens inseridos com sucesso na base de dados.");
+    } catch (dbErr) {
+      await connection.rollback();
+      console.error("❌ Erro ao inserir na base de dados:", dbErr);
+      return res.status(500).json({ error: "Falha ao inserir na base de dados", details: dbErr.message });
+    } finally {
+      connection.release();
+    }
+
+    // 6️⃣ Retornar JSON processado
+    return res.json(parsed);
 
   } catch (error) {
     console.error("❌ Erro geral:", error);
@@ -98,4 +146,5 @@ A estrutura deve ser:
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor a correr na porta ${PORT}`));
+
 
