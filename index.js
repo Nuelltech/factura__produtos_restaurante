@@ -14,12 +14,13 @@ app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
-// Conexão MySQL
-const db = await mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
+
+// Criar pool de conexões usando as variáveis do Render
+const db = mysql.createPool({
+  host: process.env.MYSQL_HOST,
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASS,
+  database: process.env.MYSQL_DB,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
