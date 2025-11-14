@@ -29,7 +29,7 @@ async function inserirItems(purchaseId, supplierId, supplier_code, supplier_desc
   const conn = await db.getConnection();
   try {
     const sql = `
-      INSERT INTO Raw_Purchase_items
+      INSERT INTO Raw_Purchase_Items
         (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
