@@ -57,19 +57,24 @@ app.post("/process-fatura", async (req, res) => {
       return res.status(500).json({ error: "OPENAI_API_KEY não definido no servidor" });
     }
 
-    const aiResponse = await openai.responses.create({
-      model: "gpt-4.1-mini", // ajusta se necessário (usa um modelo multimodal disponível)
-      input: [
+const aiResponse = await openai.responses.create({
+  model: "gpt-4.1",
+  input: [
+    {
+      role: "user",
+      content: [
         {
-          type: "image_url",
-          image_url: { url: fileUrl }
+          type: "input_image",
+          image_url: fileUrl
         },
         {
           type: "input_text",
           text: "Extrai os dados da fatura em JSON com os campos: supplier_description, supplier_code, purchase_date, items[].qty, items[].unit_supplier, items[].price_unit, items[].price_total, items[].vat_rate"
         }
-      ],
-    });
+      ]
+    }
+  ]
+});
 
     console.log("AI response raw:", aiResponse?.output_text?.slice?.(0, 1000) ?? "(sem texto)");
 
