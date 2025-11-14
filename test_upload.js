@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const API_URL = "https://factura-produtos-restaurante.onrender.com/process-fatura";
 
 // Caminho para o ficheiro de teste (imagem ou PDF da fatura)
-const filePath = "./fatura_teste.pdf";
+const filePath = "./Compras_Restaurante_Alambique_exemplo_1.jpg";
 
 async function testUpload() {
   try {
