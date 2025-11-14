@@ -12,20 +12,47 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Inicializar OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
-
-// Criar pool de conexões usando as variáveis do Render
+// Conexão MySQL
 const db = mysql.createPool({
   host: process.env.MYSQL_HOST,
   user: process.env.MYSQL_USER,
   password: process.env.MYSQL_PASS,
   database: process.env.MYSQL_DB,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  port: process.env.MYSQL_PORT || 3306
 });
 
+// Função para inserir itens na tabela
+async function inserirItems(purchaseId, supplierId, supplier_code, supplier_description, purchase_date, items) {
+  const conn = await db.getConnection();
+  try {
+    const sql = `
+      INSERT INTO Raw_Purchase_items
+        (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+    for (const item of items) {
+      await conn.execute(sql, [
+        purchaseId,
+        supplierId,
+        supplier_code,
+        supplier_description,
+        item.qty || null,
+        item.unit_supplier || null,
+        item.price_unit || null,
+        item.price_total || null,
+        item.vat_rate ? parseFloat(item.vat_rate.replace('%','')) : null,
+        purchase_date || null
+      ]);
+    }
+  } finally {
+    conn.release();
+  }
+}
+
+// Endpoint principal
 app.post("/process-fatura", async (req, res) => {
   try {
     const { fileUrl } = req.body;
@@ -54,7 +81,7 @@ app.post("/process-fatura", async (req, res) => {
     });
     console.log("📝 OCR concluído.");
 
-    // 3️⃣ Enviar texto ao OpenAI para extrair JSON
+    // 3️⃣ Extrair JSON via OpenAI
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
@@ -90,7 +117,7 @@ A estrutura deve ser:
 
     const text = completion.choices?.[0]?.message?.content;
 
-    // 4️⃣ Garantir que é JSON válido
+    // 4️⃣ Garantir JSON válido
     let parsed;
     try {
       parsed = JSON.parse(text);
@@ -99,43 +126,25 @@ A estrutura deve ser:
       return res.status(500).json({ error: "Falha ao parsear JSON", raw_output: text });
     }
 
+    console.log("🧾 JSON extraído com sucesso:", parsed);
+
     // 5️⃣ Inserir na base de dados
-    const connection = await db.getConnection();
     try {
-      await connection.beginTransaction();
-
-      // Inserir cada item na tabela Raw_Purchase_Items
-      const insertItemQuery = `
-        INSERT INTO Raw_Purchase_Items
-        (supplier_description, supplier_code, purchase_date, description, qty, unit_supplier, price_unit, price_total, vat_rate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `;
-
-      for (const item of parsed.items) {
-        await connection.execute(insertItemQuery, [
-          parsed.supplier_description,
-          parsed.supplier_code,
-          parsed.purchase_date,
-          item.description,
-          item.qty,
-          item.unit_supplier,
-          item.price_unit,
-          item.price_total,
-          item.vat_rate
-        ]);
-      }
-
-      await connection.commit();
-      console.log("✅ Itens inseridos com sucesso na base de dados.");
+      await inserirItems(
+        null, // purchase_id
+        null, // supplier_id
+        parsed.supplier_code,
+        parsed.supplier_description,
+        parsed.purchase_date,
+        parsed.items
+      );
+      console.log("✅ Dados inseridos na tabela Raw_Purchase_items");
     } catch (dbErr) {
-      await connection.rollback();
       console.error("❌ Erro ao inserir na base de dados:", dbErr);
-      return res.status(500).json({ error: "Falha ao inserir na base de dados", details: dbErr.message });
-    } finally {
-      connection.release();
+      return res.status(500).json({ error: "Erro ao inserir na base de dados", details: dbErr.message });
     }
 
-    // 6️⃣ Retornar JSON processado
+    // 6️⃣ Retornar JSON final
     return res.json(parsed);
 
   } catch (error) {
@@ -147,5 +156,6 @@ A estrutura deve ser:
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor a correr na porta ${PORT}`));
+
 
 
