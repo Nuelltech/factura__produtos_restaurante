@@ -1,56 +1,59 @@
 import express from "express";
 import fetch from "node-fetch";
-import OpenAI from "openai";
+import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
+import Tesseract from "tesseract.js";
 
 dotenv.config();
 
 const app = express();
-
-// Middleware
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json());
 
-// Inicializar OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_KEY
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
-// Endpoint
 app.post("/process-fatura", async (req, res) => {
   try {
     const { fileUrl } = req.body;
 
-    if (!fileUrl || typeof fileUrl !== "string") {
-      return res.status(400).json({ error: "Parâmetro 'fileUrl' é obrigatório." });
+    if (!fileUrl) {
+      return res.status(400).json({ error: "fileUrl é obrigatório." });
     }
 
     console.log("📥 Recebido fileUrl:", fileUrl);
 
-    // Verificar se a URL é acessível
+    // 1️⃣ Baixar a imagem
     const fileResp = await fetch(fileUrl);
     if (!fileResp.ok) {
-      return res.status(400).json({ error: "Não foi possível acessar o fileUrl." });
+      return res.status(400).json({ error: "Falha ao descarregar o ficheiro." });
     }
 
-    console.log("📄 Fatura acessível.");
+    const arrayBuffer = await fileResp.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
 
-    // Chamada à OpenAI Responses API
-    const aiResponse = await openai.responses.create({
+    console.log("📄 Fatura descarregada com sucesso.");
+
+    // 2️⃣ OCR com Tesseract
+    console.log("🔍 A processar OCR...");
+    const { data: { text: ocrText } } = await Tesseract.recognize(buffer, "por", {
+      logger: m => console.log(m)
+    });
+    console.log("📝 OCR concluído.");
+
+    // 3️⃣ Enviar texto ao OpenAI para extrair JSON
+    const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
-      input: [
-        { type: "input_image", image_url: fileUrl },
+      messages: [
         {
-          type: "input_text",
-          text: `
+          role: "system",
+          content: `
 Tu és um extrator de dados de faturas.
-RESPEITA ESTRITAMENTE:
+Responde SOMENTE com JSON válido.
+Não acrescentes explicações nem blocos de código.
+Se não conseguires extrair algo, coloca null.
+A estrutura deve ser:
 
--> Responde apenas com JSON válido.
--> Sem explicações, sem texto antes ou depois.
--> Se não conseguires extrair algo, usa null.
--> Estrutura obrigatória:
 {
   "supplier_description": "",
   "supplier_code": "",
@@ -66,27 +69,33 @@ RESPEITA ESTRITAMENTE:
     }
   ]
 }
-          `
+`
+        },
+        {
+          role: "user",
+          content: ocrText
         }
       ]
     });
 
-    const text = aiResponse.output_text ?? "";
+    const text = completion.choices?.[0]?.message?.content;
 
+    // 4️⃣ Garantir que é JSON válido
     try {
       const parsed = JSON.parse(text);
       return res.json(parsed);
     } catch (err) {
-      console.warn("⚠️ Falha ao parsear JSON retornado pelo modelo.");
-      return res.status(500).json({ error: "Falha ao parsear JSON da AI.", raw: text });
+      console.log("⚠️ Modelo não devolveu JSON válido:", text);
+      return res.status(500).json({ error: "Falha ao parsear JSON", raw_output: text });
     }
 
-  } catch (err) {
-    console.error("❌ Erro no processamento:", err);
-    return res.status(500).json({ error: err.message || String(err) });
+  } catch (error) {
+    console.error("❌ Erro geral:", error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor a correr na porta ${PORT}`));
+
