@@ -1,17 +1,17 @@
 import express from "express";
-import multer from "multer";
-import fs from "fs";
+import dotenv from "dotenv";
 import OpenAI from "openai";
 import mysql from "mysql2/promise";
-import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-const upload = multer({ dest: "uploads/" });
+app.use(express.json()); // Para processar JSON
 
+// Configuração do cliente OpenAI
 const client = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
+// Conexão MySQL
 const pool = mysql.createPool({
   host: process.env.MYSQL_HOST,
   user: process.env.MYSQL_USER,
@@ -19,22 +19,25 @@ const pool = mysql.createPool({
   database: process.env.MYSQL_DB,
 });
 
-app.post("/process-fatura", upload.single("file"), async (req, res) => {
+// Endpoint principal para processar faturas via URL
+app.post("/process-fatura", async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "Ficheiro não enviado" });
+    const { fileUrl } = req.body;
 
-    const fileStream = fs.createReadStream(req.file.path);
+    if (!fileUrl) {
+      return res.status(400).json({ error: "Parâmetro 'fileUrl' não fornecido" });
+    }
 
+    // Chamada à API OpenAI (modelo multimodal)
     const aiResponse = await client.responses.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4.1-mini", // modelo compatível
       input: [
         {
           role: "user",
           content: [
             {
-              type: "input_file",
-              file: fileStream,
-              filename: req.file.originalname
+              type: "image_url",
+              image_url: { url: fileUrl }
             },
             {
               type: "input_text",
@@ -46,20 +49,21 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
     });
 
     const jsonText = aiResponse.output_text;
+
     let json;
     try {
       json = JSON.parse(jsonText);
     } catch (err) {
       console.error("Erro ao parsear JSON do modelo:", jsonText);
-      fs.unlinkSync(req.file.path);
       return res.status(500).json({ error: "Falha ao parsear JSON do modelo" });
     }
 
+    // Inserção na tabela Raw_Purchase_Items
     for (const item of json.items) {
       await pool.execute(
         `INSERT INTO Raw_Purchase_Items
-        (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date, processed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date, processed)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         [
           json.purchase_id || null,
           json.supplier_id || null,
@@ -75,7 +79,6 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
       );
     }
 
-    fs.unlinkSync(req.file.path);
     res.json({ status: "ok", data: json });
   } catch (err) {
     console.error("Erro no processamento:", err);
@@ -83,6 +86,6 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
   }
 });
 
+// Porta fornecida pelo Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor iniciado na porta ${PORT}`));
-
