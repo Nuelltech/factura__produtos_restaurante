@@ -35,39 +35,48 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
         const aiResponse = await client.chat.completions.create({
             model: "gpt-4.1-preview",
             messages: [
-                { role: "system", content: "Extrai dados de faturas e devolve JSON válido." },
+                { 
+                    role: "system", 
+                    content: "Extrai dados de faturas. Devolve JSON com supplier_code, supplier_description, purchase_date e items [{qty, unit_supplier, price_unit, price_total, vat_rate}]." 
+                },
                 {
                     role: "user",
                     content: [
                         { type: "input_file", data: fileData, name: req.file.originalname },
-                        { type: "text", text: "Extrai fornecedor, NIF, data, número de fatura, items, subtotal, IVA, total." }
+                        { type: "text", text: "Extrai os dados e devolve JSON limpo e válido." }
                     ]
                 }
             ]
         });
 
         const jsonText = aiResponse.choices[0].message.content;
-        const json = JSON.parse(jsonText);
+        const data = JSON.parse(jsonText);
 
-        // Inserir na tabela staging
-        const sql = `
-            INSERT INTO staging_faturas
-            (fornecedor, nif, data_fatura, numero_fatura, items_json, total)
-            VALUES (?, ?, ?, ?, ?, ?)
+        // Inserir itens na Raw_Purchase_Items
+        const insertSQL = `
+            INSERT INTO Raw_Purchase_Items
+            (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date, processed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
         `;
 
-        await pool.execute(sql, [
-            json.fornecedor,
-            json.nif,
-            json.data,
-            json.numero,
-            JSON.stringify(json.items),
-            json.total,
-        ]);
+        for (const item of data.items) {
+            await pool.execute(insertSQL, [
+                null,                           // purchase_id
+                null,                           // supplier_id
+                data.supplier_code || null,
+                data.supplier_description || null,
+                item.qty,
+                item.unit_supplier,
+                item.price_unit,
+                item.price_total,
+                item.vat_rate,
+                data.purchase_date
+            ]);
+        }
 
         fs.unlinkSync(filePath); // apaga ficheiro
 
-        res.json({ status: "ok", data: json });
+        res.json({ status: "ok", data });
 
     } catch (err) {
         console.error("Erro no processamento:", err);
@@ -75,6 +84,6 @@ app.post("/process-fatura", upload.single("file"), async (req, res) => {
     }
 });
 
-// A porta é definida automaticamente pelo Render
+// Usado pelo Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Servidor iniciado na porta ${PORT}`));
