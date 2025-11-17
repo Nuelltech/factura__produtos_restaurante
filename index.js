@@ -12,10 +12,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Inicializar OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
-// Conexão MySQL
 const db = mysql.createPool({
   host: process.env.MYSQL_HOST,
   user: process.env.MYSQL_USER,
@@ -24,83 +22,100 @@ const db = mysql.createPool({
   port: process.env.MYSQL_PORT || 3306
 });
 
-// Função para inserir itens na tabela
-async function inserirItems(purchaseId, supplierId, supplier_code, supplier_description, purchase_date, items) {
+// 👉 Agora insere os novos campos na tabela atualizada
+async function inserirItems(parsed) {
   const conn = await db.getConnection();
   try {
+
     const sql = `
       INSERT INTO Raw_Purchase_Items
-        (purchase_id, supplier_id, supplier_code, supplier_description, qty, unit_supplier, price_unit, price_total, vat_rate, purchase_date)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (purchase_id, purchase_date, supplier_id, supplier_description,
+       product_code, product_desc, qty, unit_supplier, price_unit,
+       price_total, vat_rate)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
-    for (const item of items) {
+
+    for (const item of parsed.items) {
       await conn.execute(sql, [
-        purchaseId,
-        supplierId,
-        supplier_code,
-        supplier_description,
+        parsed.purchase_id || null,
+        parsed.purchase_date || null,
+        null, // supplier_id futuro
+        parsed.supplier_description || null,
+        item.product_code || null,
+        item.product_desc || null,
         item.qty || null,
         item.unit_supplier || null,
         item.price_unit || null,
         item.price_total || null,
-        item.vat_rate ? parseFloat(item.vat_rate.replace('%','')) : null,
-        purchase_date || null
+        item.vat_rate ? parseFloat(item.vat_rate.replace('%', '')) : null,
       ]);
     }
+
+    console.log("✅ Inserido com sucesso na Raw_Purchase_Items");
+
   } finally {
     conn.release();
   }
 }
 
-// Endpoint principal
 app.post("/process-fatura", async (req, res) => {
   try {
     const { fileUrl } = req.body;
 
-    if (!fileUrl) {
+    if (!fileUrl)
       return res.status(400).json({ error: "fileUrl é obrigatório." });
-    }
 
-    console.log("📥 Recebido fileUrl:", fileUrl);
+    console.log("📥 URL recebido:", fileUrl);
 
-    // 1️⃣ Baixar a imagem
     const fileResp = await fetch(fileUrl);
-    if (!fileResp.ok) {
-      return res.status(400).json({ error: "Falha ao descarregar o ficheiro." });
-    }
+    if (!fileResp.ok)
+      return res.status(400).json({ error: "Falha ao descarregar ficheiro." });
 
     const arrayBuffer = await fileResp.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    console.log("📄 Fatura descarregada com sucesso.");
+    console.log("📄 Imagem descarregada.");
 
-    // 2️⃣ OCR com Tesseract
     console.log("🔍 A processar OCR...");
     const { data: { text: ocrText } } = await Tesseract.recognize(buffer, "por", {
       logger: m => console.log(m)
     });
     console.log("📝 OCR concluído.");
 
-    // 3️⃣ Extrair JSON via OpenAI
+    // ------- OPENAI EXTRAÇÃO AVANÇADA -------
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
         {
           role: "system",
           content: `
-Tu és um extrator de dados de faturas.
-Responde SOMENTE com JSON válido.
-Não acrescentes explicações nem blocos de código.
-Se não conseguires extrair algo, coloca null.
-A estrutura deve ser:
+És um extrator de dados de faturas.
+Responde apenas com JSON válido.
 
+Extrai:
+- purchase_id (número da fatura, invoice nº, doc nº++)
+- purchase_date
+- supplier_description (nome do fornecedor)
+- Para cada linha:
+    - product_code
+    - product_desc
+    - qty
+    - unit_supplier (unidade: kg, un, lt, etc)
+    - price_unit
+    - price_total
+    - vat_rate (%)
+
+Se algo não existir, devolve null.
+
+Formato OBRIGATÓRIO:
 {
-  "supplier_description": "",
-  "supplier_code": "",
+  "purchase_id": "",
   "purchase_date": "",
+  "supplier_description": "",
   "items": [
     {
-      "description": "",
+      "product_code": "",
+      "product_desc": "",
       "qty": 0,
       "unit_supplier": "",
       "price_unit": 0,
@@ -117,45 +132,27 @@ A estrutura deve ser:
 
     const text = completion.choices?.[0]?.message?.content;
 
-    // 4️⃣ Garantir JSON válido
     let parsed;
     try {
       parsed = JSON.parse(text);
     } catch (err) {
-      console.log("⚠️ Modelo não devolveu JSON válido:", text);
-      return res.status(500).json({ error: "Falha ao parsear JSON", raw_output: text });
+      return res.status(500).json({
+        error: "OpenAI não devolveu JSON válido.",
+        raw_output: text
+      });
     }
 
-    console.log("🧾 JSON extraído com sucesso:", parsed);
+    console.log("🧾 JSON extraído:", parsed);
 
-    // 5️⃣ Inserir na base de dados
-    try {
-      await inserirItems(
-        null, // purchase_id
-        null, // supplier_id
-        parsed.supplier_code,
-        parsed.supplier_description,
-        parsed.purchase_date,
-        parsed.items
-      );
-      console.log("✅ Dados inseridos na tabela Raw_Purchase_items");
-    } catch (dbErr) {
-      console.error("❌ Erro ao inserir na base de dados:", dbErr);
-      return res.status(500).json({ error: "Erro ao inserir na base de dados", details: dbErr.message });
-    }
+    await inserirItems(parsed);
 
-    // 6️⃣ Retornar JSON final
     return res.json(parsed);
 
   } catch (error) {
-    console.error("❌ Erro geral:", error);
+    console.error("❌ Erro:", error);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// Iniciar servidor
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor a correr na porta ${PORT}`));
-
-
-
+app.listen(PORT, () => console.log(`🚀 Servidor iniciado na porta ${PORT}`));
