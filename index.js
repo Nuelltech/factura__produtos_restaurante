@@ -89,29 +89,26 @@ app.post("/process-fatura", async (req, res) => {
         {
           role: "system",
           content: `
-És um extrator de dados de faturas.
+És um extrator inteligente de dados de faturas portuguesas.
 Responde apenas com JSON válido.
 
-Extrai:
-- purchase_id (número da fatura, invoice nº, doc nº++)
-- purchase_date
-- supplier_description (nome do fornecedor)
-- Para cada linha:
-    - product_code
-    - product_desc
-    - qty
-    - unit_supplier (unidade: kg, un, lt, etc)
-    - price_unit
-    - price_total
-    - vat_rate (%)
+REGRAS IMPORTANTES:
+- NUNCA inventes valores.
+- Se algo não existir na fatura: devolve null.
+- Se existir ambiguidade entre quantidade e preço, segue a lógica:
+  - price_total ≈ price_unit × qty
+  - Se “x 24”, “x30”, “cx24”, “emb. 24” ⇒ qty = 24
+  - Se a linha tiver duas casas decimais → normalmente é preço
+- Extrai sempre o código do produto quando aparecer como:
+  - “REF”, “CÓD.”, “COD”, “ART”, “REFERÊNCIA”, “PROD.”
+- Extrai sempre o NIF do fornecedor (NIF, CONtribuinte, VAT, TIN).
 
-Se algo não existir, devolve null.
-
-Formato OBRIGATÓRIO:
+FORMATO OBRIGATÓRIO DO JSON:
 {
   "purchase_id": "",
   "purchase_date": "",
   "supplier_description": "",
+  "supplier_nif": "",
   "items": [
     {
       "product_code": "",
@@ -124,6 +121,11 @@ Formato OBRIGATÓRIO:
     }
   ]
 }
+
+Nomes dos campos obrigatórios:
+- purchase_id: número da fatura, doc nº, invoice nº, número do documento
+- supplier_description: nome legal do fornecedor
+- supplier_nif: NIF do fornecedor (9 dígitos português)
 `
         },
         { role: "user", content: ocrText }
