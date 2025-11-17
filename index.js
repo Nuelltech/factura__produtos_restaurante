@@ -82,7 +82,7 @@ Se não encontrares um campo, deixa-o em branco.
 // -------------------------------------------------
 // Endpoint principal /extract
 // -------------------------------------------------
-app.post("/extract", async (req, res) => {
+app.post("/process-fatura", async (req, res) => {
   try {
     const { fileUrl } = req.body;
 
