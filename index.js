@@ -9,160 +9,171 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json());
 
-const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
-if (!OPENAI_KEY) console.error("⚠️ OPENAI_KEY / OPENAI_API_KEY não definido nas env vars.");
-const openai = new OpenAI({ apiKey: OPENAI_KEY });
+// Inicializar OpenAI
+const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
 
+// Conexão MySQL
 const db = mysql.createPool({
   host: process.env.MYSQL_HOST,
   user: process.env.MYSQL_USER,
   password: process.env.MYSQL_PASS,
   database: process.env.MYSQL_DB,
-  port: process.env.MYSQL_PORT ? parseInt(process.env.MYSQL_PORT) : 3306,
-  waitForConnections: true,
-  connectionLimit: 10
+  port: process.env.MYSQL_PORT || 3306
 });
 
-// Funções auxiliares para normalização etc. (mantém conforme mostrado)
-
-function normalizeNumber(str) { /* ... */ }
-function extractProductCodeFromDesc(desc) { /* ... */ }
-function normalizeUnit(u) { /* ... */ }
-function normalizeVat(v) { /* ... */ }
-function cleanItem(parsedItem) { /* ... */ }
-function sanitizeParsed(parsed) { /* ... */ }
-async function getSupplierIdByNif(nif) { /* ... */ }
-async function createSupplier(nif, name) { /* ... */ }
-async function inserirItems(parsed) { /* ... */ }
-
-async function extractTextFromResponse(resp) { /* ... */ }
-
+// Modelo: instruções do assistente
 const LLM_SYSTEM_PROMPT = `
-És um extrator de dados de faturas portuguesas. RESPONDE SOMENTE COM JSON VÁLIDO — NADA MAIS.
-Se não puderes extrair um campo, devolve null (não texto explicativo).
-Extrai: purchase_id, purchase_date, supplier_description, supplier_nif, items[].
-Cada item: product_code, product_desc, qty, unit_supplier, price_unit, price_total, vat_rate.
-Formato OBRIGATÓRIO:
+Tu és um extrator de dados de faturas portuguesas.
+
+Regressa APENAS JSON válido.
+Se algo não existir, coloca null.
+
+Estrutura obrigatória:
+
 {
   "purchase_id": "",
   "purchase_date": "",
   "supplier_description": "",
-  "supplier_nif": "",
+  "supplier_id": "",
   "items": [
     {
       "product_code": "",
       "product_desc": "",
-      "qty": 0,
+      "qty": "",
       "unit_supplier": "",
-      "price_unit": 0,
-      "price_total": 0,
+      "price_unit": "",
+      "price_total": "",
       "vat_rate": ""
     }
   ]
 }
+
+Notas:
+- purchase_id pode ser Invoice Nº, FT Nº, Documento Nº, Nº Fatura.
+- supplier_id é o NIF (número fiscal).
+- product_code é o código do artigo.
+- product_desc é a descrição da linha do artigo.
+- qty é quantidade real, nunca preço.
+- price_unit é preço unitário.
+- price_total é o total da linha.
+- vat_rate é percentagem do IVA.
 `;
 
-// Função atualizada para usar base64 com Responses API
-async function callMultimodalModelWithImageUrl(base64Image, ocrHint = "") {
-  const input = [
-  {
-    role: "user",
-    content: [
-      {
-        type: "input_image",
-        data: base64Image  // usar "data" em vez de "image"
-      },
-      {
-        type: "input_text",
-        text: LLM_SYSTEM_PROMPT
-      }
-    ]
-  }
-];
+// Função para enviar imagem via Responses API (input_image)
+async function callMultimodalModel(fileUrl) {
+  // 1) Baixar ficheiro bruto
+  const imgResp = await fetch(fileUrl);
+  if (!imgResp.ok) throw new Error("Falha ao descarregar imagem.");
+  const imgBuffer = Buffer.from(await imgResp.arrayBuffer());
+  const base64Image = imgBuffer.toString("base64");
 
-  return await openai.responses.create({
+  // 2) Montar input
+  const input = [
+    {
+      role: "user",
+      content: [
+        { type: "input_image", image: base64Image },
+        { type: "input_text", text: LLM_SYSTEM_PROMPT }
+      ]
+    }
+  ];
+
+  // 3) Chamada ao modelo
+  const response = await openai.responses.create({
     model: "gpt-4.1-preview",
     input,
-    max_output_tokens: 3000
+    max_output_tokens: 4000
   });
+
+  return response.output_text;
 }
 
+// Função para inserir itens da fatura
+async function inserirItems(parsed) {
+  const conn = await db.getConnection();
+  try {
+    const sql = `
+      INSERT INTO Raw_Purchase_Items
+        (purchase_id, purchase_date, supplier_id, supplier_description,
+         product_code, product_desc, qty, unit_supplier,
+         price_unit, price_total, vat_rate)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    for (const item of parsed.items) {
+      await conn.execute(sql, [
+        parsed.purchase_id || null,
+        parsed.purchase_date || null,
+        parsed.supplier_id || null,
+        parsed.supplier_description || null,
+        item.product_code || null,
+        item.product_desc || null,
+        item.qty || null,
+        item.unit_supplier || null,
+        item.price_unit || null,
+        item.price_total || null,
+        item.vat_rate ? parseFloat(item.vat_rate.replace("%","")) : null
+      ]);
+    }
+
+  } finally {
+    conn.release();
+  }
+}
+
+// Endpoint principal
 app.post("/process-fatura", async (req, res) => {
   try {
-    const { fileBase64 } = req.body ?? {};
-    if (!fileBase64) return res.status(400).json({ error: "fileBase64 não fornecido" });
+    const { fileUrl } = req.body;
 
-    console.log("Recebido base64 image String, comprimento:", fileBase64.length);
+    if (!fileUrl) {
+      return res.status(400).json({ error: "fileUrl é obrigatório." });
+    }
 
-    // Chamar LLM multimodal
-    let llmResp;
+    console.log("📥 Recebido fileUrl:", fileUrl);
+
+    // 1) Chamada multimodal
+    let textOutput;
     try {
-      llmResp = await callMultimodalModelWithImageUrl(fileBase64);
-    } catch (err) {
-      console.error("Erro na chamada multimodal:", err);
-      return res.status(500).json({ error: "Erro na chamada multimodal", details: String(err) });
+      textOutput = await callMultimodalModel(fileUrl);
+    } catch (e) {
+      console.error("Erro na chamada multimodal:", e);
+      return res.status(500).json({ error: "Erro multimodal", details: e.message });
     }
 
-    // Extrair e limpar texto JSON
-    const raw = await extractTextFromResponse(llmResp);
-    console.log("LLM raw output (início):", raw?.slice?.(0, 1000) ?? "(vazio)");
-
-    let cleaned = raw;
-    if (!cleaned) return res.status(500).json({ error: "LLM devolveu vazio" });
-
-    cleaned = cleaned.replace(/``````/g, "").trim();
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    let jsonText = cleaned;
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      jsonText = cleaned.slice(firstBrace, lastBrace + 1);
-    }
-
+    // 2) Validar JSON
     let parsed;
     try {
-      parsed = JSON.parse(jsonText);
+      parsed = JSON.parse(textOutput);
     } catch (err) {
-      console.error("Falha ao parsear JSON do LLM. raw start:", cleaned.slice(0, 1000));
-      return res.status(500).json({ error: "LLM não devolveu JSON válido", raw: cleaned });
+      console.error("Falha a gerar JSON válido:", textOutput);
+      return res.status(500).json({
+        error: "OpenAI não devolveu JSON válido",
+        raw_output: textOutput
+      });
     }
 
-    parsed = sanitizeParsed(parsed);
-
-    // Fornecedor lookup/insert
-    let supplierId = null;
-    if (parsed.supplier_nif) {
-      supplierId = await getSupplierIdByNif(parsed.supplier_nif);
-      if (!supplierId && (process.env.AUTO_CREATE_SUPPLIER || "true") === "true") {
-        supplierId = await createSupplier(parsed.supplier_nif, parsed.supplier_description || null);
-        console.log("Created supplier id:", supplierId);
-      }
+    // 3) Inserir na base de dados
+    try {
+      await inserirItems(parsed);
+      console.log("✅ Dados inseridos com sucesso.");
+    } catch (dbErr) {
+      console.error("Erro ao inserir na BD:", dbErr);
+      return res.status(500).json({ error: "Erro BD", details: dbErr.message });
     }
-    parsed.supplier_id = supplierId || null;
 
-    parsed.items = Array.isArray(parsed.items) ? parsed.items.map(cleanItem) : [];
-    await inserirItems(parsed);
+    return res.json(parsed);
 
-    console.log("Inseridos itens:", parsed.items.length);
-    return res.json({ status: "ok", parsed });
-
-  } catch (err) {
-    console.error("Erro no endpoint /process-fatura:", err);
-    return res.status(500).json({ error: String(err) });
+  } catch (error) {
+    console.error("❌ Erro geral:", error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
-app.post("/debug-llm", async (req, res) => {
-  try {
-    const { fileBase64 } = req.body ?? {};
-    if (!fileBase64) return res.status(400).json({ error: "fileBase64 required" });
-    const resp = await callMultimodalModelWithImageUrl(fileBase64);
-    return res.json({ raw: resp });
-  } catch (err) {
-    return res.status(500).json({ error: String(err) });
-  }
-});
-
+// Iniciar servidor
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`🚀 Servidor a correr na porta ${PORT}`)
+);
