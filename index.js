@@ -67,20 +67,20 @@ Formato OBRIGATÓRIO:
 // Função atualizada para usar base64 com Responses API
 async function callMultimodalModelWithImageUrl(base64Image, ocrHint = "") {
   const input = [
-    {
-      role: "user",
-      content: [
-        {
-          type: "input_image",
-          image: base64Image
-        },
-        {
-          type: "input_text",
-          text: `${LLM_SYSTEM_PROMPT}\n\nContexto adicional: ${ocrHint}`
-        }
-      ]
-    }
-  ];
+  {
+    role: "user",
+    content: [
+      {
+        type: "input_image",
+        data: base64Image  // usar "data" em vez de "image"
+      },
+      {
+        type: "input_text",
+        text: LLM_SYSTEM_PROMPT
+      }
+    ]
+  }
+];
 
   return await openai.responses.create({
     model: "gpt-4.1-preview",
